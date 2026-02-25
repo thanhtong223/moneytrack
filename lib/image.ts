@@ -20,7 +20,8 @@ export async function takeReceiptPhoto(): Promise<ReceiptFile | null> {
   const result = await ImagePicker.launchCameraAsync({
     cameraType: ImagePicker.CameraType.back,
     allowsEditing: true,
-    quality: 0.8,
+    quality: 0.35,
+    aspect: [3, 4],
   });
 
   if (result.canceled || !result.assets[0]?.uri) return null;
@@ -32,7 +33,8 @@ export async function uploadReceiptImage(): Promise<ReceiptFile | null> {
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images'],
     allowsEditing: true,
-    quality: 0.8,
+    quality: 0.35,
+    aspect: [3, 4],
   });
 
   if (result.canceled || !result.assets[0]?.uri) return null;

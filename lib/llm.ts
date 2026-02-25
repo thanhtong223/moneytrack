@@ -62,13 +62,16 @@ function pickMimeType(uri: string, kind: 'audio' | 'image'): string {
   return 'image/jpeg';
 }
 
-async function uriToBase64(uri: string): Promise<string> {
+async function uriToBase64(uri: string, maxBytes?: number): Promise<string> {
   const res = await fetch(uri);
   if (!res.ok) {
     throw new Error('Failed to read local media file');
   }
 
   const blob = await res.blob();
+  if (maxBytes && blob.size > maxBytes) {
+    throw new Error(`Media file is too large (${Math.round(blob.size / 1024 / 1024)}MB). Please crop/compress and retry.`);
+  }
   const dataUrl: string = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
@@ -158,7 +161,7 @@ export function hasLLMConfig(): boolean {
 }
 
 export async function transcribeAudio(uri: string, language: Language): Promise<string> {
-  const base64 = await uriToBase64(uri);
+  const base64 = await uriToBase64(uri, 7_000_000);
   const mimeType = pickMimeType(uri, 'audio');
   const prompt =
     language === 'vi'
@@ -177,7 +180,7 @@ export async function transcribeAudio(uri: string, language: Language): Promise<
 }
 
 export async function extractReceiptText(imageUri: string, language: Language): Promise<string> {
-  const base64 = await uriToBase64(imageUri);
+  const base64 = await uriToBase64(imageUri, 3_500_000);
   const mimeType = pickMimeType(imageUri, 'image');
   const prompt =
     language === 'vi'
