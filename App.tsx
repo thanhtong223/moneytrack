@@ -480,7 +480,15 @@ export default function App() {
 
     try {
       setLoading(true);
-      const receipt = source === 'camera' ? await takeReceiptPhoto() : await uploadReceiptImage();
+      const resolvedSource = source === 'camera' && Platform.OS === 'web' ? 'upload' : source;
+      if (source === 'camera' && Platform.OS === 'web') {
+        Alert.alert(
+          language === 'vi' ? 'Web không hỗ trợ chụp trực tiếp ổn định.' : 'Direct camera capture on web is not reliably supported.',
+          language === 'vi' ? 'Vui lòng chọn ảnh hóa đơn từ máy.' : 'Please upload a receipt image from your device.',
+        );
+      }
+
+      const receipt = resolvedSource === 'camera' ? await takeReceiptPhoto() : await uploadReceiptImage();
       if (!receipt) return;
       const extracted = await extractReceiptText(receipt.uri, language);
       let parsed;
@@ -961,7 +969,11 @@ export default function App() {
                 <Pressable style={styles.quickActionBtn} onPress={onStartVoiceRecording} disabled={Boolean(recording)}>
                   <Text style={styles.ghostText}>{recording ? 'Đang ghi âm...' : t(language, 'startVoice')}</Text>
                 </Pressable>
-                <Pressable style={styles.quickActionBtn} onPress={() => onImageAi('camera')}><Text style={styles.ghostText}>{t(language, 'receiptCamera')}</Text></Pressable>
+                {Platform.OS !== 'web' ? (
+                  <Pressable style={styles.quickActionBtn} onPress={() => onImageAi('camera')}>
+                    <Text style={styles.ghostText}>{t(language, 'receiptCamera')}</Text>
+                  </Pressable>
+                ) : null}
                 <Pressable style={styles.quickActionBtn} onPress={() => onImageAi('upload')}><Text style={styles.ghostText}>{t(language, 'receiptUpload')}</Text></Pressable>
               </View>
             </>
