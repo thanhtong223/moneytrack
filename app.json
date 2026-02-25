@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Finance MVP",
+    "slug": "finance-mvp",
+    "scheme": "moneytrack",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Capture receipt photos to log expenses.",
+        "NSMicrophoneUsageDescription": "Record voice notes to log transactions.",
+        "NSPhotoLibraryUsageDescription": "Upload receipt photos to log transactions."
+      }
+    },
+    "android": {
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "READ_MEDIA_IMAGES"
+      ]
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker"
+    ]
+  }
+}
