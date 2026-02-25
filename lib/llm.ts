@@ -70,7 +70,9 @@ async function uriToBase64(uri: string, maxBytes?: number): Promise<string> {
 
   const blob = await res.blob();
   if (maxBytes && blob.size > maxBytes) {
-    throw new Error(`Media file is too large (${Math.round(blob.size / 1024 / 1024)}MB). Please crop/compress and retry.`);
+    throw new Error(
+      `Media file is too large (${(blob.size / 1024 / 1024).toFixed(1)}MB). Please crop/compress and retry with a smaller file.`,
+    );
   }
   const dataUrl: string = await new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -161,7 +163,8 @@ export function hasLLMConfig(): boolean {
 }
 
 export async function transcribeAudio(uri: string, language: Language): Promise<string> {
-  const base64 = await uriToBase64(uri, 7_000_000);
+  // Keep under common serverless request limits after base64 expansion.
+  const base64 = await uriToBase64(uri, 1_700_000);
   const mimeType = pickMimeType(uri, 'audio');
   const prompt =
     language === 'vi'
@@ -180,7 +183,8 @@ export async function transcribeAudio(uri: string, language: Language): Promise<
 }
 
 export async function extractReceiptText(imageUri: string, language: Language): Promise<string> {
-  const base64 = await uriToBase64(imageUri, 3_500_000);
+  // Keep under common serverless request limits after base64 expansion.
+  const base64 = await uriToBase64(imageUri, 1_700_000);
   const mimeType = pickMimeType(imageUri, 'image');
   const prompt =
     language === 'vi'
