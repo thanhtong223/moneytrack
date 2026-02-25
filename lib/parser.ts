@@ -47,25 +47,57 @@ function detectCurrency(text: string, fallback: Currency): Currency {
 }
 
 function parseAmount(raw: string, currency: Currency): number | null {
-  const lower = raw.toLowerCase().replace(/,/g, '.');
+  const lower = raw.toLowerCase();
+  // Remove common date formats so year/day tokens do not get mistaken as price.
+  const scrubbed = lower
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, ' ')
+    .replace(/\b(?:ngày|day)\s+\d{1,2}\b/g, ' ');
 
-  const shorthandMatch = lower.match(/(\d+(?:\.\d+)?)\s*(k|tr|m|mil|xị|cu|củ|chai)\b/);
-  if (shorthandMatch) {
-    const base = Number(shorthandMatch[1]);
-    const unit = shorthandMatch[2];
-    if (['k', 'xị'].includes(unit)) return base * 1_000;
-    if (['tr', 'củ', 'cu', 'chai'].includes(unit)) return base * 1_000_000;
-    if (['m', 'mil'].includes(unit)) return currency === 'VND' ? base * 1_000_000 : base * 1_000_000;
+  const unitMultiplier = (unit?: string): number => {
+    if (!unit) return 1;
+    if (['k', 'xị'].includes(unit)) return 1_000;
+    if (['tr', 'củ', 'cu', 'chai', 'm', 'mil'].includes(unit)) return 1_000_000;
+    return 1;
+  };
+
+  const parseNumberToken = (numText: string): number | null => {
+    const compact = numText.replace(/\s/g, '');
+    if (!compact) return null;
+
+    // Thousands-like formats: 8.000.000 / 8,000,000
+    if (/^\d{1,3}([.,]\d{3})+([.,]\d+)?$/.test(compact)) {
+      const normalized = compact.replace(/[.,]/g, '');
+      const value = Number(normalized);
+      return Number.isNaN(value) ? null : value;
+    }
+
+    // Decimal-like formats: 12.5 / 12,5
+    const normalized = compact.replace(',', '.');
+    const value = Number(normalized);
+    return Number.isNaN(value) ? null : value;
+  };
+
+  type Candidate = { amount: number; hasUnit: boolean };
+  const candidates: Candidate[] = [];
+  const tokenRe = /(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)(?:\s*)(k|tr|m|mil|xị|cu|củ|chai|vnd|đ|usd|\$)?/g;
+  let match: RegExpExecArray | null;
+  while ((match = tokenRe.exec(scrubbed)) !== null) {
+    const parsedNum = parseNumberToken(match[1]);
+    if (!parsedNum) continue;
+    const unit = match[2];
+    const amount = parsedNum * unitMultiplier(unit);
+    candidates.push({ amount, hasUnit: Boolean(unit) });
   }
 
-  const rawNum = lower.match(/(\d+(?:\.\d+)?)/);
-  if (!rawNum) return null;
+  if (candidates.length === 0) return null;
 
-  const value = Number(rawNum[1]);
-  if (Number.isNaN(value)) return null;
+  // Prefer tokens that have explicit money unit/currency marker.
+  const withUnits = candidates.filter((c) => c.hasUnit);
+  let value = (withUnits.length > 0 ? withUnits : candidates).reduce((best, cur) => (cur.amount > best ? cur.amount : best), 0);
 
   if (currency === 'VND' && value < 1000 && /(ăn|cafe|grab|com|trà|tea|mua)/.test(lower)) {
-    return value * 1_000;
+    value *= 1_000;
   }
 
   return value;
