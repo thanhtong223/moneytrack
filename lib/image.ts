@@ -22,10 +22,16 @@ export async function takeReceiptPhoto(): Promise<ReceiptFile | null> {
     allowsEditing: true,
     quality: 0.35,
     aspect: [3, 4],
+    base64: true,
   });
 
   if (result.canceled || !result.assets[0]?.uri) return null;
-  return { uri: result.assets[0].uri, type: 'image', name: 'camera-receipt.jpg' };
+  const asset = result.assets[0];
+  // Normalize camera output to JPEG data URI for better downstream model compatibility.
+  if (asset.base64) {
+    return { uri: `data:image/jpeg;base64,${asset.base64}`, type: 'image', name: 'camera-receipt.jpg' };
+  }
+  return { uri: asset.uri, type: 'image', name: 'camera-receipt.jpg' };
 }
 
 export async function uploadReceiptImage(): Promise<ReceiptFile | null> {
