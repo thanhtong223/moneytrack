@@ -16,6 +16,15 @@ function usernameToEmail(username: string): string {
   return `${normalized}@moneytrack.local`;
 }
 
+function normalizeAuthErrorMessage(message: string): string {
+  const lower = message.toLowerCase();
+  if (lower.includes('invalid login credentials')) return 'Invalid username or password';
+  if (lower.includes('already registered') || lower.includes('user already registered')) return 'Username already exists';
+  if (lower.includes('email not confirmed')) return 'Account not active yet. Disable email confirmation in Supabase Auth settings for this MVP.';
+  if (lower.includes('relation') && lower.includes('does not exist')) return 'Database schema is missing. Run supabase/schema.sql in Supabase SQL Editor.';
+  return message;
+}
+
 function toSessionUser(profile: ProfileRow): LocalSessionUser {
   return { id: profile.id, username: profile.username };
 }
@@ -82,7 +91,7 @@ export async function registerLocal(username: string, password: string): Promise
     },
   });
 
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(normalizeAuthErrorMessage(error.message));
   if (!data.user) throw new Error('Could not create user');
 
   const profile = await ensureProfile(data.user.id, username.trim());
@@ -101,7 +110,7 @@ export async function loginLocal(username: string, password: string): Promise<Lo
     password,
   });
   if (error || !data.user) {
-    throw new Error(error?.message ?? 'Invalid username or password');
+    throw new Error(normalizeAuthErrorMessage(error?.message ?? 'Invalid username or password'));
   }
 
   let profile = await getProfileById(data.user.id);
@@ -118,7 +127,7 @@ export async function updateLocalUsername(userId: string, nextUsername: string):
   }
 
   const { error } = await supabase.from('profiles').update({ username: nextUsername.trim() }).eq('id', userId);
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(normalizeAuthErrorMessage(error.message));
 
   const profile = await getProfileById(userId);
   if (!profile) throw new Error('User not found');
@@ -140,7 +149,7 @@ export async function updateLocalPassword(userId: string, currentPassword: strin
   if (signInError) throw new Error('Current password is incorrect');
 
   const { error: updateError } = await supabase.auth.updateUser({ password: nextPassword });
-  if (updateError) throw new Error(updateError.message);
+  if (updateError) throw new Error(normalizeAuthErrorMessage(updateError.message));
 }
 
 export async function deleteLocalAccount(userId: string, password: string): Promise<void> {
@@ -162,4 +171,3 @@ export async function deleteLocalAccount(userId: string, password: string): Prom
   await supabase.from('profiles').delete().eq('id', userId);
   await signOutLocal();
 }
-

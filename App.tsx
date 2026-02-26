@@ -126,6 +126,8 @@ export default function App() {
   const [guestLanguage, setGuestLanguage] = useState<Language>('vi');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
 
   const [tab, setTab] = useState<Tab>('home');
   const [addMode, setAddMode] = useState<AddMode>('manual');
@@ -339,20 +341,30 @@ export default function App() {
 
   async function signInOrSignUp() {
     Keyboard.dismiss();
-    if (!username.trim() || !password.trim()) return;
+    setAuthError('');
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername || !password.trim()) {
+      setAuthError(language === 'vi' ? 'Vui lòng nhập tên đăng nhập và mật khẩu.' : 'Please enter username and password.');
+      return;
+    }
 
     try {
+      setAuthLoading(true);
       if (authMode === 'login') {
-        const loggedIn = await loginLocal(username.trim(), password);
+        const loggedIn = await loginLocal(trimmedUsername, password);
         setUser(loggedIn);
         return;
       }
 
-      const registered = await registerLocal(username.trim(), password);
+      const registered = await registerLocal(trimmedUsername, password);
       setUser(registered);
       Alert.alert('Registered', 'Your account has been created.');
     } catch (e) {
-      Alert.alert(authMode === 'login' ? 'Login failed' : 'Register failed', e instanceof Error ? e.message : 'Unknown error');
+      const message = e instanceof Error ? e.message : 'Unknown error';
+      setAuthError(message);
+      Alert.alert(authMode === 'login' ? 'Login failed' : 'Register failed', message);
+    } finally {
+      setAuthLoading(false);
     }
   }
 
@@ -361,6 +373,8 @@ export default function App() {
     setUser(null);
     setUsername('');
     setPassword('');
+    setAuthError('');
+    setAuthLoading(false);
   }
 
   function buildTx(parsed: Omit<Transaction, 'id' | 'accountId' | 'createdAt'>, mode: Transaction['inputMode'], receipt?: ReceiptFile | null) {
@@ -700,7 +714,10 @@ export default function App() {
           <TextInput
             style={styles.input}
             value={username}
-            onChangeText={setUsername}
+            onChangeText={(v) => {
+              setUsername(v);
+              if (authError) setAuthError('');
+            }}
             autoCapitalize="none"
             returnKeyType="next"
             blurOnSubmit={false}
@@ -711,15 +728,31 @@ export default function App() {
           <TextInput
             style={styles.input}
             value={password}
-            onChangeText={setPassword}
+            onChangeText={(v) => {
+              setPassword(v);
+              if (authError) setAuthError('');
+            }}
             secureTextEntry
             returnKeyType="done"
             onSubmitEditing={signInOrSignUp}
             placeholder={language === 'vi' ? 'Mật khẩu' : 'Password'}
             placeholderTextColor={palette.sub}
           />
-          <Pressable style={styles.primaryBtn} onPress={signInOrSignUp}>
-            <Text style={styles.primaryBtnText}>{authMode === 'login' ? (language === 'vi' ? 'Đăng nhập' : 'Login') : language === 'vi' ? 'Đăng ký' : 'Register'}</Text>
+          {authError ? <Text style={styles.authErrorText}>{authError}</Text> : null}
+          <Pressable style={[styles.primaryBtn, authLoading && styles.primaryBtnDisabled]} onPress={signInOrSignUp} disabled={authLoading}>
+            <Text style={styles.primaryBtnText}>
+              {authLoading
+                ? language === 'vi'
+                  ? 'Đang xử lý...'
+                  : 'Processing...'
+                : authMode === 'login'
+                  ? language === 'vi'
+                    ? 'Đăng nhập'
+                    : 'Login'
+                  : language === 'vi'
+                    ? 'Đăng ký'
+                    : 'Register'}
+            </Text>
           </Pressable>
           <Pressable style={styles.authLinkWrap} onPress={() => setAuthMode((m) => (m === 'login' ? 'register' : 'login'))}>
             <Text style={styles.authLinkText}>
@@ -1486,6 +1519,8 @@ function makeStyles(c: typeof dark) {
     inputBig: { backgroundColor: c.muted, borderWidth: 1, borderColor: c.border, borderRadius: 20, color: c.text, paddingHorizontal: 14, paddingVertical: 14, fontSize: 28, fontWeight: '700' },
     primaryBtn: { backgroundColor: c.accent, borderRadius: 18, alignItems: 'center', paddingVertical: 13 },
     primaryBtnText: { color: c.bg, fontWeight: '800', fontSize: 20 },
+    primaryBtnDisabled: { opacity: 0.6 },
+    authErrorText: { color: c.danger, fontWeight: '600', fontSize: 13, marginTop: -2, marginBottom: 2 },
     ghostBtn: { flex: 1, borderWidth: 1, borderColor: c.border, borderRadius: 16, paddingVertical: 11, alignItems: 'center', backgroundColor: c.muted },
     ghostText: { color: c.text, fontWeight: '700' },
     formLabel: { color: c.text, fontSize: 14, fontWeight: '700', marginTop: 4 },
