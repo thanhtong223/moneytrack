@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { Platform } from 'react-native';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
@@ -15,7 +16,7 @@ export const supabase: SupabaseClient = createClient(SUPABASE_URL as string, SUP
   auth: {
     persistSession: true,
     autoRefreshToken: true,
-    detectSessionInUrl: false,
+    // Required for OAuth/password-recovery on web callback URLs.
+    detectSessionInUrl: Platform.OS === 'web',
   },
 });
-

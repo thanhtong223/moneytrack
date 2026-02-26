@@ -221,6 +221,14 @@ export default function App() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+        getLocalSessionUser()
+          .then(setUser)
+          .catch(() => setUser(null));
+      }
+      if (event === 'SIGNED_OUT') {
+        setUser(null);
+      }
       if (event === 'PASSWORD_RECOVERY') {
         setResetPasswordMode(true);
       }
