@@ -27,7 +27,7 @@ import Svg, { Circle } from 'react-native-svg';
 import { fetchUsdVndRate, FxRate } from './lib/exchange';
 import { pickReceiptFile, ReceiptFile, takeReceiptPhoto, uploadReceiptImage } from './lib/image';
 import { t } from './lib/i18n';
-import { extractReceiptText, hasLLMConfig, normalizeTextToTransaction, transcribeAudio } from './lib/llm';
+import { extractReceiptText, hasLLMConfig, normalizeTextToTransaction, parseReceiptImageToTransaction, transcribeAudio } from './lib/llm';
 import { parseTransactionInput } from './lib/parser';
 import {
   formatAmount,
@@ -490,12 +490,16 @@ export default function App() {
 
       const receipt = resolvedSource === 'camera' ? await takeReceiptPhoto() : await uploadReceiptImage();
       if (!receipt) return;
-      const extracted = await extractReceiptText(receipt.uri, language);
       let parsed;
       try {
-        parsed = parseTransactionInput(extracted, 'image', language, settings.defaultCurrency, 'expense');
+        parsed = await parseReceiptImageToTransaction(receipt.uri, language, settings.defaultCurrency, 'expense');
       } catch {
-        parsed = await normalizeTextToTransaction(extracted, language, settings.defaultCurrency, 'expense');
+        const extracted = await extractReceiptText(receipt.uri, language);
+        try {
+          parsed = parseTransactionInput(extracted, 'image', language, settings.defaultCurrency, 'expense');
+        } catch {
+          parsed = await normalizeTextToTransaction(extracted, language, settings.defaultCurrency, 'expense');
+        }
       }
       parsed = applyEntryDate(parsed);
       pushTx(buildTx(parsed, 'image', receipt));

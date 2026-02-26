@@ -202,6 +202,63 @@ export async function extractReceiptText(imageUri: string, language: Language): 
   ]);
 }
 
+export async function parseReceiptImageToTransaction(
+  imageUri: string,
+  language: Language,
+  fallbackCurrency: Currency,
+  preferredType: TransactionType = 'expense',
+): Promise<ParsedTransaction> {
+  const base64 = await uriToBase64(imageUri, 1_700_000);
+  const mimeType = pickMimeType(imageUri, 'image');
+  const instruction =
+    language === 'vi'
+      ? [
+          'Đây là ảnh hóa đơn/chứng từ. Hãy trích xuất và trả về JSON duy nhất.',
+          'Keys bắt buộc: type, amount, currency, category, merchant, date, note, rawInput.',
+          'Ưu tiên amount là số tiền thanh toán cuối cùng (tổng phải trả).',
+          'Không lấy nhầm số lượng, dung tích, số model làm amount.',
+          'Date phải là YYYY-MM-DD, currency chỉ USD hoặc VND, type chỉ income hoặc expense.',
+          'Nếu thiếu currency thì dùng defaultCurrency.',
+          'Nếu date không rõ, dùng hôm nay.',
+        ].join(' ')
+      : [
+          'This is a receipt/proof image. Extract one transaction and return only JSON.',
+          'Required keys: type, amount, currency, category, merchant, date, note, rawInput.',
+          'Prefer amount as the final payable total.',
+          'Do not confuse quantity/model/volume numbers with amount.',
+          'Date must be YYYY-MM-DD, currency must be USD or VND, type must be income or expense.',
+          'If currency missing, use defaultCurrency.',
+          'If date unclear, use today.',
+        ].join(' ');
+
+  const output = await callGemini([
+    { text: `${instruction}\nlanguage=${language}; defaultCurrency=${fallbackCurrency}; preferredType=${preferredType}` },
+    {
+      inline_data: {
+        mime_type: mimeType,
+        data: base64,
+      },
+    },
+  ]);
+
+  const parsed = JSON.parse(cleanJson(output)) as Partial<ParsedTransaction>;
+  if (!parsed.amount || !parsed.currency || !parsed.type) {
+    throw new Error('Gemini image output missing required fields');
+  }
+
+  return {
+    type: parsed.type,
+    amount: Number(parsed.amount),
+    currency: parsed.currency,
+    category: parsed.category ?? (parsed.type === 'income' ? 'Other Income' : 'Other Expense'),
+    merchant: parsed.merchant,
+    date: parsed.date ?? new Date().toISOString().slice(0, 10),
+    note: parsed.note ?? parsed.merchant ?? (language === 'vi' ? 'Giao dịch từ ảnh' : 'Image transaction'),
+    inputMode: 'image',
+    rawInput: parsed.rawInput ?? parsed.note ?? '',
+  };
+}
+
 export async function normalizeTextToTransaction(
   raw: string,
   language: Language,
