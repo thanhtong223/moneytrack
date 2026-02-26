@@ -33,6 +33,13 @@ function toSessionUser(profile: ProfileRow): LocalSessionUser {
   return { id: profile.id, username: profile.username };
 }
 
+function fallbackSessionUser(userId: string, preferred?: string): LocalSessionUser {
+  return {
+    id: userId,
+    username: (preferred?.trim() || 'user').slice(0, 64),
+  };
+}
+
 async function ensureProfile(userId: string, username: string, emailOverride?: string): Promise<ProfileRow> {
   const baseUsername = username.trim() || 'user';
   const email = (emailOverride?.trim() || usernameToEmail(baseUsername)).toLowerCase();
@@ -70,15 +77,20 @@ export async function getLocalSessionUser(): Promise<LocalSessionUser | null> {
   if (sessionError) throw new Error(sessionError.message);
   if (!session?.user) return null;
 
-  const profile = await getProfileById(session.user.id);
-  if (profile) return toSessionUser(profile);
-
   const username =
     (session.user.user_metadata?.username as string | undefined) ??
     session.user.email?.split('@')[0] ??
     'user';
-  const ensured = await ensureProfile(session.user.id, username, session.user.email ?? undefined);
-  return toSessionUser(ensured);
+
+  try {
+    const profile = await getProfileById(session.user.id);
+    if (profile) return toSessionUser(profile);
+    const ensured = await ensureProfile(session.user.id, username, session.user.email ?? undefined);
+    return toSessionUser(ensured);
+  } catch {
+    // Never block sign-in because profile row creation failed.
+    return fallbackSessionUser(session.user.id, username);
+  }
 }
 
 export async function signOutLocal(): Promise<void> {
@@ -104,8 +116,12 @@ export async function registerLocal(email: string, password: string, username?: 
   if (error) throw new Error(normalizeAuthErrorMessage(error.message));
   if (!data.user) throw new Error('Could not create user');
 
-  const profile = await ensureProfile(data.user.id, preferredUsername, normalizedEmail);
-  return toSessionUser(profile);
+  try {
+    const profile = await ensureProfile(data.user.id, preferredUsername, normalizedEmail);
+    return toSessionUser(profile);
+  } catch {
+    return fallbackSessionUser(data.user.id, preferredUsername);
+  }
 }
 
 export async function loginLocal(identifier: string, password: string): Promise<LocalSessionUser> {
@@ -123,12 +139,16 @@ export async function loginLocal(identifier: string, password: string): Promise<
     throw new Error(normalizeAuthErrorMessage(error?.message ?? 'Invalid username or password'));
   }
 
-  let profile = await getProfileById(data.user.id);
-  if (!profile) {
-    const recoveredUsername = (data.user.user_metadata?.username as string | undefined) ?? email.split('@')[0];
-    profile = await ensureProfile(data.user.id, recoveredUsername, data.user.email ?? email);
+  const recoveredUsername = (data.user.user_metadata?.username as string | undefined) ?? email.split('@')[0];
+  try {
+    let profile = await getProfileById(data.user.id);
+    if (!profile) {
+      profile = await ensureProfile(data.user.id, recoveredUsername, data.user.email ?? email);
+    }
+    return toSessionUser(profile);
+  } catch {
+    return fallbackSessionUser(data.user.id, recoveredUsername);
   }
-  return toSessionUser(profile);
 }
 
 export async function loginWithGoogle(redirectTo?: string): Promise<void> {
