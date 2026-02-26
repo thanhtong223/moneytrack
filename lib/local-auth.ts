@@ -1,9 +1,9 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from './supabase';
 
-type LocalUserRecord = {
+type ProfileRow = {
   id: string;
   username: string;
-  password: string;
+  email: string;
 };
 
 export type LocalSessionUser = {
@@ -11,103 +11,118 @@ export type LocalSessionUser = {
   username: string;
 };
 
-const USERS_KEY = 'moneytrack-local-users';
-const SESSION_KEY = 'moneytrack-local-session';
+function usernameToEmail(username: string): string {
+  const normalized = username.trim().toLowerCase();
+  return `${normalized}@moneytrack.local`;
+}
 
-async function loadUsers(): Promise<LocalUserRecord[]> {
-  const raw = await AsyncStorage.getItem(USERS_KEY);
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw) as LocalUserRecord[];
-  } catch {
-    return [];
+function toSessionUser(profile: ProfileRow): LocalSessionUser {
+  return { id: profile.id, username: profile.username };
+}
+
+async function ensureProfile(userId: string, username: string): Promise<ProfileRow> {
+  const email = usernameToEmail(username);
+  const payload = {
+    id: userId,
+    username: username.trim(),
+    email,
+  };
+
+  const { data, error } = await supabase.from('profiles').upsert(payload).select('id,username,email').single();
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Could not upsert profile');
   }
+  return data as ProfileRow;
 }
 
-async function saveUsers(users: LocalUserRecord[]): Promise<void> {
-  await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-}
-
-function toSessionUser(user: LocalUserRecord): LocalSessionUser {
-  return { id: user.id, username: user.username };
+async function getProfileById(userId: string): Promise<ProfileRow | null> {
+  const { data, error } = await supabase.from('profiles').select('id,username,email').eq('id', userId).maybeSingle();
+  if (error) {
+    throw new Error(error.message);
+  }
+  return (data as ProfileRow | null) ?? null;
 }
 
 export async function getLocalSessionUser(): Promise<LocalSessionUser | null> {
-  const raw = await AsyncStorage.getItem(SESSION_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as LocalSessionUser;
-  } catch {
-    return null;
-  }
+  const {
+    data: { session },
+    error: sessionError,
+  } = await supabase.auth.getSession();
+  if (sessionError) throw new Error(sessionError.message);
+  if (!session?.user) return null;
+
+  const profile = await getProfileById(session.user.id);
+  if (profile) return toSessionUser(profile);
+
+  const username =
+    (session.user.user_metadata?.username as string | undefined) ??
+    session.user.email?.replace(/@moneytrack\.local$/i, '') ??
+    'user';
+  const ensured = await ensureProfile(session.user.id, username);
+  return toSessionUser(ensured);
 }
 
 export async function signOutLocal(): Promise<void> {
-  await AsyncStorage.removeItem(SESSION_KEY);
+  const { error } = await supabase.auth.signOut();
+  if (error) throw new Error(error.message);
 }
 
 export async function registerLocal(username: string, password: string): Promise<LocalSessionUser> {
-  const users = await loadUsers();
   const normalized = username.trim().toLowerCase();
-
   if (!normalized || !password) {
     throw new Error('Username and password are required');
   }
 
-  if (users.some((u) => u.username.toLowerCase() === normalized)) {
-    throw new Error('Username already exists');
-  }
-
-  const user: LocalUserRecord = {
-    id: `usr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    username: username.trim(),
+  const email = usernameToEmail(normalized);
+  const { data, error } = await supabase.auth.signUp({
+    email,
     password,
-  };
+    options: {
+      data: { username: username.trim() },
+    },
+  });
 
-  users.push(user);
-  await saveUsers(users);
+  if (error) throw new Error(error.message);
+  if (!data.user) throw new Error('Could not create user');
 
-  const sessionUser = toSessionUser(user);
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessionUser));
-  return sessionUser;
+  const profile = await ensureProfile(data.user.id, username.trim());
+  return toSessionUser(profile);
 }
 
 export async function loginLocal(username: string, password: string): Promise<LocalSessionUser> {
-  const users = await loadUsers();
   const normalized = username.trim().toLowerCase();
-
-  const found = users.find((u) => u.username.toLowerCase() === normalized);
-  if (!found || found.password !== password) {
-    throw new Error('Invalid username or password');
+  if (!normalized || !password) {
+    throw new Error('Username and password are required');
   }
 
-  const sessionUser = toSessionUser(found);
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessionUser));
-  return sessionUser;
+  const email = usernameToEmail(normalized);
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+  if (error || !data.user) {
+    throw new Error(error?.message ?? 'Invalid username or password');
+  }
+
+  let profile = await getProfileById(data.user.id);
+  if (!profile) {
+    profile = await ensureProfile(data.user.id, username.trim());
+  }
+  return toSessionUser(profile);
 }
 
 export async function updateLocalUsername(userId: string, nextUsername: string): Promise<LocalSessionUser> {
-  const users = await loadUsers();
   const normalized = nextUsername.trim().toLowerCase();
   if (!normalized) {
     throw new Error('Username is required');
   }
 
-  const idx = users.findIndex((u) => u.id === userId);
-  if (idx < 0) {
-    throw new Error('User not found');
-  }
+  const { error } = await supabase.from('profiles').update({ username: nextUsername.trim() }).eq('id', userId);
+  if (error) throw new Error(error.message);
 
-  if (users.some((u) => u.id !== userId && u.username.toLowerCase() === normalized)) {
-    throw new Error('Username already exists');
-  }
-
-  users[idx] = { ...users[idx], username: nextUsername.trim() };
-  await saveUsers(users);
-
-  const sessionUser = toSessionUser(users[idx]);
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessionUser));
-  return sessionUser;
+  const profile = await getProfileById(userId);
+  if (!profile) throw new Error('User not found');
+  return toSessionUser(profile);
 }
 
 export async function updateLocalPassword(userId: string, currentPassword: string, nextPassword: string): Promise<void> {
@@ -115,32 +130,36 @@ export async function updateLocalPassword(userId: string, currentPassword: strin
     throw new Error('New password is required');
   }
 
-  const users = await loadUsers();
-  const idx = users.findIndex((u) => u.id === userId);
-  if (idx < 0) {
-    throw new Error('User not found');
-  }
+  const profile = await getProfileById(userId);
+  if (!profile) throw new Error('User not found');
 
-  if (users[idx].password !== currentPassword) {
-    throw new Error('Current password is incorrect');
-  }
+  const { error: signInError } = await supabase.auth.signInWithPassword({
+    email: profile.email,
+    password: currentPassword,
+  });
+  if (signInError) throw new Error('Current password is incorrect');
 
-  users[idx] = { ...users[idx], password: nextPassword };
-  await saveUsers(users);
+  const { error: updateError } = await supabase.auth.updateUser({ password: nextPassword });
+  if (updateError) throw new Error(updateError.message);
 }
 
 export async function deleteLocalAccount(userId: string, password: string): Promise<void> {
-  const users = await loadUsers();
-  const idx = users.findIndex((u) => u.id === userId);
-  if (idx < 0) {
+  const profile = await getProfileById(userId);
+  if (!profile) {
     throw new Error('User not found');
   }
 
-  if (users[idx].password !== password) {
-    throw new Error('Password is incorrect');
-  }
+  const { error: signInError } = await supabase.auth.signInWithPassword({
+    email: profile.email,
+    password,
+  });
+  if (signInError) throw new Error('Password is incorrect');
 
-  const nextUsers = users.filter((u) => u.id !== userId);
-  await saveUsers(nextUsers);
-  await AsyncStorage.removeItem(SESSION_KEY);
+  // Anonymous clients cannot delete Auth user directly. We clear app data and sign out.
+  await supabase.from('app_transactions').delete().eq('user_id', userId);
+  await supabase.from('app_accounts').delete().eq('user_id', userId);
+  await supabase.from('app_settings').delete().eq('user_id', userId);
+  await supabase.from('profiles').delete().eq('id', userId);
+  await signOutLocal();
 }
+

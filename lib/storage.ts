@@ -1,9 +1,5 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Account, AppSettings, Currency, Transaction } from '../types/finance';
-
-const TX_KEY = 'finance-mvp-transactions';
-const ACCOUNT_KEY = 'finance-mvp-accounts';
-const SETTINGS_KEY = 'finance-mvp-settings';
+import { supabase } from './supabase';
 
 const defaultAccount: Account = {
   id: 'acc-cash',
@@ -20,60 +16,58 @@ const defaultSettings: AppSettings = {
   defaultAccountId: defaultAccount.id,
 };
 
-function scope(key: string, userId: string): string {
-  return `${key}:${userId}`;
-}
+type JsonRow<T> = {
+  user_id: string;
+  data: T;
+};
 
 export async function loadTransactions(userId: string): Promise<Transaction[]> {
-  const raw = await AsyncStorage.getItem(scope(TX_KEY, userId));
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as Transaction[];
-    return parsed.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  } catch {
-    return [];
-  }
+  const { data, error } = await supabase.from('app_transactions').select('data').eq('user_id', userId).maybeSingle();
+  if (error) throw new Error(error.message);
+  const row = data as { data?: Transaction[] } | null;
+  const items = row?.data ?? [];
+  return [...items].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
 export async function saveTransactions(userId: string, items: Transaction[]): Promise<void> {
-  await AsyncStorage.setItem(scope(TX_KEY, userId), JSON.stringify(items));
+  const payload: JsonRow<Transaction[]> = { user_id: userId, data: items };
+  const { error } = await supabase.from('app_transactions').upsert(payload);
+  if (error) throw new Error(error.message);
 }
 
 export async function loadAccounts(userId: string): Promise<Account[]> {
-  const raw = await AsyncStorage.getItem(scope(ACCOUNT_KEY, userId));
-  if (!raw) return [defaultAccount];
-  try {
-    const parsed = JSON.parse(raw) as Account[];
-    if (parsed.length === 0) return [defaultAccount];
-    return parsed;
-  } catch {
-    return [defaultAccount];
-  }
+  const { data, error } = await supabase.from('app_accounts').select('data').eq('user_id', userId).maybeSingle();
+  if (error) throw new Error(error.message);
+  const row = data as { data?: Account[] } | null;
+  const items = row?.data ?? [];
+  if (items.length === 0) return [defaultAccount];
+  return items;
 }
 
 export async function saveAccounts(userId: string, items: Account[]): Promise<void> {
-  await AsyncStorage.setItem(scope(ACCOUNT_KEY, userId), JSON.stringify(items));
+  const payload: JsonRow<Account[]> = { user_id: userId, data: items };
+  const { error } = await supabase.from('app_accounts').upsert(payload);
+  if (error) throw new Error(error.message);
 }
 
 export async function loadSettings(userId: string): Promise<AppSettings> {
-  const raw = await AsyncStorage.getItem(scope(SETTINGS_KEY, userId));
-  if (!raw) return defaultSettings;
-  try {
-    return { ...defaultSettings, ...(JSON.parse(raw) as Partial<AppSettings>) };
-  } catch {
-    return defaultSettings;
-  }
+  const { data, error } = await supabase.from('app_settings').select('data').eq('user_id', userId).maybeSingle();
+  if (error) throw new Error(error.message);
+  const row = data as { data?: Partial<AppSettings> } | null;
+  return { ...defaultSettings, ...(row?.data ?? {}) };
 }
 
 export async function saveSettings(userId: string, settings: AppSettings): Promise<void> {
-  await AsyncStorage.setItem(scope(SETTINGS_KEY, userId), JSON.stringify(settings));
+  const payload: JsonRow<AppSettings> = { user_id: userId, data: settings };
+  const { error } = await supabase.from('app_settings').upsert(payload);
+  if (error) throw new Error(error.message);
 }
 
 export async function clearUserData(userId: string): Promise<void> {
-  await AsyncStorage.multiRemove([
-    scope(TX_KEY, userId),
-    scope(ACCOUNT_KEY, userId),
-    scope(SETTINGS_KEY, userId),
+  await Promise.all([
+    supabase.from('app_transactions').delete().eq('user_id', userId),
+    supabase.from('app_accounts').delete().eq('user_id', userId),
+    supabase.from('app_settings').delete().eq('user_id', userId),
   ]);
 }
 
@@ -84,3 +78,4 @@ export function formatAmount(amount: number, currency: Currency, locale: 'en-US'
     maximumFractionDigits: currency === 'VND' ? 0 : 2,
   }).format(amount);
 }
+

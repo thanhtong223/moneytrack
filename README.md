@@ -37,6 +37,13 @@ EXPO_PUBLIC_GEMINI_FALLBACK_MODELS=gemini-3-flash,gemini-2.5-flash
 npx expo start -c
 ```
 
+5. Configure Supabase (required for auth + data persistence)
+1. Open Supabase SQL Editor and run:
+```bash
+supabase/schema.sql
+```
+2. In Supabase Auth settings, disable email confirmation for this username/password MVP flow.
+
 ## Important
 - Local auth is for MVP only (not production secure).
 - `EXPO_PUBLIC_*` keys are visible in client app. Do not put private API keys in `EXPO_PUBLIC_*`.
