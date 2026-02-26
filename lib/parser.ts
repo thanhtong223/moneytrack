@@ -32,11 +32,15 @@ const expenseKeywords = [
 ];
 
 const categoryRules: Array<{ re: RegExp; en: string; vi: string }> = [
-  { re: /(coffee|cafe|trà|tea|ăn|com|food|grocery|siêu thị)/i, en: 'Food', vi: 'Ăn uống' },
-  { re: /(rent|tiền nhà|nhà)/i, en: 'Housing', vi: 'Nhà ở' },
-  { re: /(grab|uber|xăng|bus|taxi|transport)/i, en: 'Transport', vi: 'Di chuyển' },
-  { re: /(salary|lương|bonus|thưởng|freelance)/i, en: 'Salary', vi: 'Thu nhập' },
-  { re: /(bill|internet|điện|nước|phone)/i, en: 'Utilities', vi: 'Hóa đơn' },
+  { re: /(coffee|cafe|trà|tea|ăn|com|food|grocery|siêu thị|restaurant|bún|phở)/i, en: 'Food & Drink', vi: 'Ăn uống' },
+  { re: /(rent|tiền nhà|nhà|apartment|hostel|mortgage)/i, en: 'Housing', vi: 'Nhà ở' },
+  { re: /(grab|uber|xăng|bus|taxi|transport|petrol|fuel|vé|parking)/i, en: 'Transport', vi: 'Di chuyển' },
+  { re: /(salary|lương|bonus|thưởng|freelance|payroll|income)/i, en: 'Salary', vi: 'Thu nhập' },
+  { re: /(bill|internet|điện|nước|phone|wifi|electric)/i, en: 'Bills & Utilities', vi: 'Hóa đơn' },
+  { re: /(shop|shopping|mall|mua đồ|quần áo|shopee|lazada)/i, en: 'Shopping', vi: 'Mua sắm' },
+  { re: /(doctor|hospital|medicine|pharmacy|thuốc|khám)/i, en: 'Health', vi: 'Sức khỏe' },
+  { re: /(movie|cinema|game|netflix|spotify|du lịch|travel|hotel)/i, en: 'Entertainment', vi: 'Giải trí' },
+  { re: /(tuition|học|course|class|book|sách)/i, en: 'Education', vi: 'Giáo dục' },
 ];
 
 function detectCurrency(text: string, fallback: Currency): Currency {

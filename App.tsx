@@ -40,15 +40,19 @@ import {
   saveTransactions,
 } from './lib/storage';
 import {
+  completePasswordReset,
   deleteLocalAccount,
   getLocalSessionUser,
   LocalSessionUser,
   loginLocal,
+  loginWithGoogle,
+  requestPasswordReset,
   registerLocal,
   signOutLocal,
   updateLocalPassword,
   updateLocalUsername,
 } from './lib/local-auth';
+import { supabase } from './lib/supabase';
 import { startRecording, stopRecording } from './lib/voice';
 import { Account, AppSettings, Currency, Language, ThemeMode, Transaction, TransactionType } from './types/finance';
 
@@ -91,6 +95,19 @@ function localeFromLanguage(language: Language): 'en-US' | 'vi-VN' {
   return language === 'vi' ? 'vi-VN' : 'en-US';
 }
 
+function isValidISODate(value?: string): boolean {
+  return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+}
+
+function shortTxTitle(tx: Transaction): string {
+  const merchant = tx.merchant?.trim();
+  if (merchant) return merchant;
+
+  const base = (tx.note || tx.rawInput || tx.category).replace(/\s+/g, ' ').trim();
+  if (!base) return tx.category;
+  return base.length > 42 ? `${base.slice(0, 42)}...` : base;
+}
+
 function groupedByDate(items: Transaction[]): Array<[string, Transaction[]]> {
   const map = new Map<string, Transaction[]>();
   for (const tx of items) {
@@ -124,10 +141,19 @@ export default function App() {
   const [user, setUser] = useState<LocalSessionUser | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>('login');
   const [guestLanguage, setGuestLanguage] = useState<Language>('vi');
+  const [identifier, setIdentifier] = useState('');
+  const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [resetPasswordMode, setResetPasswordMode] = useState(false);
+  const [resetPasswordValue, setResetPasswordValue] = useState('');
+  const [resetPasswordConfirm, setResetPasswordConfirm] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
 
   const [tab, setTab] = useState<Tab>('home');
   const [addMode, setAddMode] = useState<AddMode>('manual');
@@ -158,8 +184,10 @@ export default function App() {
   const [periodFilter, setPeriodFilter] = useState<PeriodFilter>('month');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [entryDate, setEntryDate] = useState(new Date().toISOString().slice(0, 10));
+  const [entryDateTouched, setEntryDateTouched] = useState(false);
   const [datePickerTarget, setDatePickerTarget] = useState<'from' | 'to' | 'entry'>('from');
   const [datePickerValue, setDatePickerValue] = useState(new Date());
   const [datePickerDraft, setDatePickerDraft] = useState(new Date());
@@ -187,6 +215,17 @@ export default function App() {
 
   useEffect(() => {
     getLocalSessionUser().then(setUser);
+  }, []);
+
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setResetPasswordMode(true);
+      }
+    });
+    return () => subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
@@ -292,7 +331,7 @@ export default function App() {
     return { income, expense, balance: income - expense };
   }, [accountTransactions, settings.defaultCurrency, usdToVnd]);
 
-  const filteredExpenseItems = useMemo(() => {
+  const periodFilteredTransactions = useMemo(() => {
     const now = new Date();
     let from = new Date(0);
     let to = new Date(now);
@@ -320,11 +359,36 @@ export default function App() {
     }
 
     return accountTransactions.filter((tx) => {
-      if (tx.type !== 'expense') return false;
       const d = new Date(tx.date);
       return d >= from && d < to;
     });
   }, [accountTransactions, periodFilter, customFrom, customTo]);
+
+  const categoryColorMap = useMemo(() => {
+    const categories = Array.from(
+      new Set(periodFilteredTransactions.filter((tx) => tx.type === 'expense').map((tx) => tx.category || 'Other')),
+    ).sort((a, b) => a.localeCompare(b));
+    const map = new Map<string, string>();
+    categories.forEach((cat, idx) => {
+      map.set(cat, DONUT_COLORS[idx % DONUT_COLORS.length]);
+    });
+    return map;
+  }, [periodFilteredTransactions]);
+
+  useEffect(() => {
+    const allowed = new Set(categoryColorMap.keys());
+    setSelectedCategories((prev) => prev.filter((cat) => allowed.has(cat)));
+  }, [categoryColorMap]);
+
+  const filteredTransactionsByCategory = useMemo(() => {
+    if (selectedCategories.length === 0) return periodFilteredTransactions;
+    return periodFilteredTransactions.filter((tx) => selectedCategories.includes(tx.category || 'Other'));
+  }, [periodFilteredTransactions, selectedCategories]);
+
+  const filteredExpenseItems = useMemo(
+    () => filteredTransactionsByCategory.filter((tx) => tx.type === 'expense'),
+    [filteredTransactionsByCategory],
+  );
 
   const expenseByCategory = useMemo(() => {
     const map = new Map<string, number>();
@@ -342,27 +406,112 @@ export default function App() {
   async function signInOrSignUp() {
     Keyboard.dismiss();
     setAuthError('');
-    const trimmedUsername = username.trim();
-    if (!trimmedUsername || !password.trim()) {
-      setAuthError(language === 'vi' ? 'Vui lòng nhập tên đăng nhập và mật khẩu.' : 'Please enter username and password.');
-      return;
-    }
 
     try {
       setAuthLoading(true);
       if (authMode === 'login') {
-        const loggedIn = await loginLocal(trimmedUsername, password);
+        const trimmedIdentifier = identifier.trim();
+        if (!trimmedIdentifier || !password.trim()) {
+          setAuthError(language === 'vi' ? 'Vui lòng nhập email/tên đăng nhập và mật khẩu.' : 'Please enter email/username and password.');
+          return;
+        }
+        const loggedIn = await loginLocal(trimmedIdentifier, password);
         setUser(loggedIn);
         return;
       }
 
-      const registered = await registerLocal(trimmedUsername, password);
+      const trimmedEmail = email.trim();
+      const trimmedUsername = username.trim();
+      if (!trimmedEmail || !password.trim()) {
+        setAuthError(language === 'vi' ? 'Vui lòng nhập email và mật khẩu.' : 'Please enter email and password.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setAuthError(language === 'vi' ? 'Mật khẩu nhập lại không khớp.' : 'Passwords do not match.');
+        return;
+      }
+      const registered = await registerLocal(trimmedEmail, password, trimmedUsername || undefined);
       setUser(registered);
-      Alert.alert('Registered', 'Your account has been created.');
+      Alert.alert(language === 'vi' ? 'Đăng ký thành công' : 'Registered', language === 'vi' ? 'Tài khoản đã được tạo.' : 'Your account has been created.');
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Unknown error';
       setAuthError(message);
-      Alert.alert(authMode === 'login' ? 'Login failed' : 'Register failed', message);
+      Alert.alert(
+        authMode === 'login' ? (language === 'vi' ? 'Đăng nhập thất bại' : 'Login failed') : language === 'vi' ? 'Đăng ký thất bại' : 'Register failed',
+        message,
+      );
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function onLoginWithGoogle() {
+    Keyboard.dismiss();
+    setAuthError('');
+    try {
+      setAuthLoading(true);
+      const redirectTo = Platform.OS === 'web' ? `${window.location.origin}` : undefined;
+      await loginWithGoogle(redirectTo);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown error';
+      setAuthError(message);
+      Alert.alert(language === 'vi' ? 'Lỗi Google đăng nhập' : 'Google login failed', message);
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function onForgotPassword() {
+    Keyboard.dismiss();
+    setAuthError('');
+    const targetEmail = identifier.trim();
+    if (!targetEmail || !targetEmail.includes('@')) {
+      setAuthError(language === 'vi' ? 'Nhập email để khôi phục mật khẩu.' : 'Enter your email to reset password.');
+      return;
+    }
+    try {
+      setAuthLoading(true);
+      const redirectTo = Platform.OS === 'web' ? `${window.location.origin}` : undefined;
+      await requestPasswordReset(targetEmail, redirectTo);
+      Alert.alert(
+        language === 'vi' ? 'Đã gửi email' : 'Email sent',
+        language === 'vi'
+          ? 'Vui lòng kiểm tra email để đặt lại mật khẩu.'
+          : 'Check your inbox to reset your password.',
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown error';
+      setAuthError(message);
+      Alert.alert(language === 'vi' ? 'Không gửi được email' : 'Cannot send reset email', message);
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function onCompletePasswordReset() {
+    Keyboard.dismiss();
+    if (!resetPasswordValue.trim()) {
+      setAuthError(language === 'vi' ? 'Nhập mật khẩu mới.' : 'Enter a new password.');
+      return;
+    }
+    if (resetPasswordValue !== resetPasswordConfirm) {
+      setAuthError(language === 'vi' ? 'Mật khẩu nhập lại không khớp.' : 'Passwords do not match.');
+      return;
+    }
+    try {
+      setAuthLoading(true);
+      await completePasswordReset(resetPasswordValue);
+      setResetPasswordMode(false);
+      setResetPasswordValue('');
+      setResetPasswordConfirm('');
+      Alert.alert(
+        language === 'vi' ? 'Đã đổi mật khẩu' : 'Password updated',
+        language === 'vi' ? 'Bạn có thể đăng nhập bằng mật khẩu mới.' : 'You can now log in with your new password.',
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown error';
+      setAuthError(message);
+      Alert.alert(language === 'vi' ? 'Lỗi đổi mật khẩu' : 'Reset password failed', message);
     } finally {
       setAuthLoading(false);
     }
@@ -371,8 +520,11 @@ export default function App() {
   async function signOut() {
     await signOutLocal();
     setUser(null);
+    setIdentifier('');
+    setEmail('');
     setUsername('');
     setPassword('');
+    setConfirmPassword('');
     setAuthError('');
     setAuthLoading(false);
   }
@@ -399,11 +551,16 @@ export default function App() {
     if (!tx) return;
     setTransactions((prev) => [tx, ...prev]);
     setPendingReceipt(null);
+    setEntryDate(new Date().toISOString().slice(0, 10));
+    setEntryDateTouched(false);
     Alert.alert(t(language, 'saved'));
   }
 
   function applyEntryDate<T extends { date: string }>(parsed: T): T {
-    return { ...parsed, date: entryDate };
+    if (entryDateTouched || !isValidISODate(parsed.date)) {
+      return { ...parsed, date: entryDate };
+    }
+    return parsed;
   }
 
   async function onManualSave() {
@@ -506,13 +663,13 @@ export default function App() {
       if (!receipt) return;
       let parsed;
       try {
-        parsed = await parseReceiptImageToTransaction(receipt.uri, language, settings.defaultCurrency, 'expense');
+        parsed = await parseReceiptImageToTransaction(receipt.uri, language, settings.defaultCurrency, aiType);
       } catch {
         const extracted = await extractReceiptText(receipt.uri, language);
         try {
-          parsed = parseTransactionInput(extracted, 'image', language, settings.defaultCurrency, 'expense');
+          parsed = parseTransactionInput(extracted, 'image', language, settings.defaultCurrency, aiType);
         } catch {
-          parsed = await normalizeTextToTransaction(extracted, language, settings.defaultCurrency, 'expense');
+          parsed = await normalizeTextToTransaction(extracted, language, settings.defaultCurrency, aiType);
         }
       }
       parsed = applyEntryDate(parsed);
@@ -542,6 +699,28 @@ export default function App() {
   }
 
   function openNativeDatePicker(target: 'from' | 'to' | 'entry') {
+    if (Platform.OS === 'web') {
+      const current =
+        target === 'from' ? customFrom || new Date().toISOString().slice(0, 10) : target === 'to' ? customTo || new Date().toISOString().slice(0, 10) : entryDate;
+      const promptText =
+        language === 'vi'
+          ? 'Nhập ngày theo dạng YYYY-MM-DD'
+          : 'Enter date in format YYYY-MM-DD';
+      const picked = window.prompt(promptText, current);
+      if (!picked) return;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(picked)) {
+        Alert.alert(language === 'vi' ? 'Ngày không hợp lệ' : 'Invalid date');
+        return;
+      }
+      if (target === 'from') setCustomFrom(picked);
+      else if (target === 'to') setCustomTo(picked);
+      else {
+        setEntryDate(picked);
+        setEntryDateTouched(true);
+      }
+      return;
+    }
+
     const seed =
       target === 'from'
         ? customFrom
@@ -576,7 +755,10 @@ export default function App() {
     const iso = selected.toISOString().slice(0, 10);
     if (datePickerTarget === 'from') setCustomFrom(iso);
     else if (datePickerTarget === 'to') setCustomTo(iso);
-    else setEntryDate(iso);
+    else {
+      setEntryDate(iso);
+      setEntryDateTouched(true);
+    }
     setDatePickerValue(selected);
     setShowDatePicker(false);
   }
@@ -589,7 +771,10 @@ export default function App() {
     const iso = datePickerDraft.toISOString().slice(0, 10);
     if (datePickerTarget === 'from') setCustomFrom(iso);
     else if (datePickerTarget === 'to') setCustomTo(iso);
-    else setEntryDate(iso);
+    else {
+      setEntryDate(iso);
+      setEntryDateTouched(true);
+    }
     setDatePickerValue(datePickerDraft);
     setShowDatePicker(false);
   }
@@ -711,41 +896,158 @@ export default function App() {
             <Chip label="English" active={language === 'en'} onPress={() => setGuestLanguage('en')} palette={palette} />
           </View>
 
-          <TextInput
-            style={styles.input}
-            value={username}
-            onChangeText={(v) => {
-              setUsername(v);
-              if (authError) setAuthError('');
-            }}
-            autoCapitalize="none"
-            returnKeyType="next"
-            blurOnSubmit={false}
-            onSubmitEditing={() => Keyboard.dismiss()}
-            placeholder={language === 'vi' ? 'Tên đăng nhập' : 'Username'}
-            placeholderTextColor={palette.sub}
-          />
-          <TextInput
-            style={styles.input}
-            value={password}
-            onChangeText={(v) => {
-              setPassword(v);
-              if (authError) setAuthError('');
-            }}
-            secureTextEntry
-            returnKeyType="done"
-            onSubmitEditing={signInOrSignUp}
-            placeholder={language === 'vi' ? 'Mật khẩu' : 'Password'}
-            placeholderTextColor={palette.sub}
-          />
+          {resetPasswordMode ? (
+            <>
+              <Text style={styles.formLabel}>{language === 'vi' ? 'Mật khẩu mới' : 'New password'}</Text>
+              <View style={styles.passwordWrap}>
+                <TextInput
+                  style={styles.passwordInput}
+                  value={resetPasswordValue}
+                  onChangeText={(v) => {
+                    setResetPasswordValue(v);
+                    if (authError) setAuthError('');
+                  }}
+                  secureTextEntry={!showResetPassword}
+                  returnKeyType="next"
+                  placeholder={language === 'vi' ? 'Nhập mật khẩu mới' : 'Enter new password'}
+                  placeholderTextColor={palette.sub}
+                />
+                <Pressable style={styles.passwordToggle} onPress={() => setShowResetPassword((prev) => !prev)}>
+                  <Ionicons name={showResetPassword ? 'eye-off-outline' : 'eye-outline'} size={18} color={palette.sub} />
+                </Pressable>
+              </View>
+              <Text style={styles.formLabel}>{language === 'vi' ? 'Nhập lại mật khẩu mới' : 'Confirm new password'}</Text>
+              <TextInput
+                style={styles.input}
+                value={resetPasswordConfirm}
+                onChangeText={(v) => {
+                  setResetPasswordConfirm(v);
+                  if (authError) setAuthError('');
+                }}
+                secureTextEntry={!showResetPassword}
+                returnKeyType="done"
+                onSubmitEditing={onCompletePasswordReset}
+                placeholder={language === 'vi' ? 'Nhập lại mật khẩu mới' : 'Confirm new password'}
+                placeholderTextColor={palette.sub}
+              />
+            </>
+          ) : authMode === 'login' ? (
+            <>
+              <TextInput
+                style={styles.input}
+                value={identifier}
+                onChangeText={(v) => {
+                  setIdentifier(v);
+                  if (authError) setAuthError('');
+                }}
+                autoCapitalize="none"
+                returnKeyType="next"
+                blurOnSubmit={false}
+                placeholder={language === 'vi' ? 'Email hoặc tên đăng nhập' : 'Email or username'}
+                placeholderTextColor={palette.sub}
+              />
+              <View style={styles.passwordWrap}>
+                <TextInput
+                  style={styles.passwordInput}
+                  value={password}
+                  onChangeText={(v) => {
+                    setPassword(v);
+                    if (authError) setAuthError('');
+                  }}
+                  secureTextEntry={!showPassword}
+                  returnKeyType="done"
+                  onSubmitEditing={signInOrSignUp}
+                  placeholder={language === 'vi' ? 'Mật khẩu' : 'Password'}
+                  placeholderTextColor={palette.sub}
+                />
+                <Pressable style={styles.passwordToggle} onPress={() => setShowPassword((prev) => !prev)}>
+                  <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={18} color={palette.sub} />
+                </Pressable>
+              </View>
+              <Pressable style={styles.authLinkWrap} onPress={onForgotPassword}>
+                <Text style={styles.authLinkText}>{language === 'vi' ? 'Quên mật khẩu?' : 'Forgot password?'}</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <TextInput
+                style={styles.input}
+                value={email}
+                onChangeText={(v) => {
+                  setEmail(v);
+                  if (authError) setAuthError('');
+                }}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                returnKeyType="next"
+                placeholder={language === 'vi' ? 'Email' : 'Email'}
+                placeholderTextColor={palette.sub}
+              />
+              <TextInput
+                style={styles.input}
+                value={username}
+                onChangeText={(v) => {
+                  setUsername(v);
+                  if (authError) setAuthError('');
+                }}
+                autoCapitalize="none"
+                returnKeyType="next"
+                placeholder={language === 'vi' ? 'Tên hiển thị (tuỳ chọn)' : 'Display name (optional)'}
+                placeholderTextColor={palette.sub}
+              />
+              <View style={styles.passwordWrap}>
+                <TextInput
+                  style={styles.passwordInput}
+                  value={password}
+                  onChangeText={(v) => {
+                    setPassword(v);
+                    if (authError) setAuthError('');
+                  }}
+                  secureTextEntry={!showPassword}
+                  returnKeyType="next"
+                  placeholder={language === 'vi' ? 'Mật khẩu' : 'Password'}
+                  placeholderTextColor={palette.sub}
+                />
+                <Pressable style={styles.passwordToggle} onPress={() => setShowPassword((prev) => !prev)}>
+                  <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={18} color={palette.sub} />
+                </Pressable>
+              </View>
+              <View style={styles.passwordWrap}>
+                <TextInput
+                  style={styles.passwordInput}
+                  value={confirmPassword}
+                  onChangeText={(v) => {
+                    setConfirmPassword(v);
+                    if (authError) setAuthError('');
+                  }}
+                  secureTextEntry={!showConfirmPassword}
+                  returnKeyType="done"
+                  onSubmitEditing={signInOrSignUp}
+                  placeholder={language === 'vi' ? 'Nhập lại mật khẩu' : 'Confirm password'}
+                  placeholderTextColor={palette.sub}
+                />
+                <Pressable style={styles.passwordToggle} onPress={() => setShowConfirmPassword((prev) => !prev)}>
+                  <Ionicons name={showConfirmPassword ? 'eye-off-outline' : 'eye-outline'} size={18} color={palette.sub} />
+                </Pressable>
+              </View>
+            </>
+          )}
           {authError ? <Text style={styles.authErrorText}>{authError}</Text> : null}
-          <Pressable style={[styles.primaryBtn, authLoading && styles.primaryBtnDisabled]} onPress={signInOrSignUp} disabled={authLoading}>
+          <Pressable
+            style={[styles.primaryBtn, authLoading && styles.primaryBtnDisabled]}
+            onPress={resetPasswordMode ? onCompletePasswordReset : signInOrSignUp}
+            disabled={authLoading}
+          >
             <Text style={styles.primaryBtnText}>
               {authLoading
                 ? language === 'vi'
                   ? 'Đang xử lý...'
                   : 'Processing...'
-                : authMode === 'login'
+                : resetPasswordMode
+                  ? language === 'vi'
+                    ? 'Đổi mật khẩu'
+                    : 'Update password'
+                  : authMode === 'login'
                   ? language === 'vi'
                     ? 'Đăng nhập'
                     : 'Login'
@@ -754,17 +1056,28 @@ export default function App() {
                     : 'Register'}
             </Text>
           </Pressable>
-          <Pressable style={styles.authLinkWrap} onPress={() => setAuthMode((m) => (m === 'login' ? 'register' : 'login'))}>
-            <Text style={styles.authLinkText}>
-              {authMode === 'login'
-                ? language === 'vi'
-                  ? 'Chưa có tài khoản? Đăng ký tài khoản mới'
-                  : "Don't have an account? Create one"
-                : language === 'vi'
-                  ? 'Đã có tài khoản? Đăng nhập'
-                  : 'Already have an account? Login'}
-            </Text>
-          </Pressable>
+          {!resetPasswordMode ? (
+            <>
+              <Pressable style={styles.ghostBtn} onPress={onLoginWithGoogle} disabled={authLoading}>
+                <Text style={styles.ghostText}>{language === 'vi' ? 'Đăng nhập với Google' : 'Continue with Google'}</Text>
+              </Pressable>
+              <Pressable style={styles.authLinkWrap} onPress={() => setAuthMode((m) => (m === 'login' ? 'register' : 'login'))}>
+                <Text style={styles.authLinkText}>
+                  {authMode === 'login'
+                    ? language === 'vi'
+                      ? 'Chưa có tài khoản? Đăng ký tài khoản mới'
+                      : "Don't have an account? Create one"
+                    : language === 'vi'
+                      ? 'Đã có tài khoản? Đăng nhập'
+                      : 'Already have an account? Login'}
+                </Text>
+              </Pressable>
+            </>
+          ) : (
+            <Pressable style={styles.authLinkWrap} onPress={() => setResetPasswordMode(false)}>
+              <Text style={styles.authLinkText}>{language === 'vi' ? 'Quay lại đăng nhập' : 'Back to login'}</Text>
+            </Pressable>
+          )}
         </View>
       </View>
     );
@@ -842,14 +1155,14 @@ export default function App() {
           return (
             <Pressable key={tx.id} style={styles.txCard} onPress={() => setSelectedTx(tx)}>
               <View style={styles.txLeft}>
-                <Text style={styles.txName} numberOfLines={2} ellipsizeMode="tail">{tx.note || tx.category}</Text>
-                <Text style={styles.subtle}>{tx.date} • {tx.category} • {tx.currency}</Text>
+                <Text style={styles.txName} numberOfLines={1} ellipsizeMode="tail">{shortTxTitle(tx)}</Text>
+                <Text style={styles.subtle}>{tx.date}</Text>
               </View>
               <View style={styles.txRight}>
                 <Text style={[tx.type === 'income' ? styles.success : styles.danger, styles.amountText]} numberOfLines={1}>
                   {tx.type === 'income' ? '+' : '-'}{formatAmount(converted, settings.defaultCurrency, locale)}
                 </Text>
-                <Text style={styles.subtle}>{tx.receiptUri ? tx.receiptType?.toUpperCase() : '-'}</Text>
+                <Text style={styles.subtle}>{tx.receiptUri ? tx.receiptType?.toUpperCase() : ''}</Text>
               </View>
             </Pressable>
           );
@@ -859,7 +1172,8 @@ export default function App() {
   }
 
   function renderTransactions() {
-    const groups = groupedByDate(accountTransactions);
+    const groups = groupedByDate(filteredTransactionsByCategory);
+    const availableCategories = Array.from(categoryColorMap.keys());
 
     return (
       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" style={styles.page} contentContainerStyle={styles.pagePad}>
@@ -884,6 +1198,37 @@ export default function App() {
             </View>
           ) : null}
 
+          <Text style={styles.subtle}>{language === 'vi' ? 'Lọc theo danh mục' : 'Filter by category'}</Text>
+          <View style={styles.rowGapWrap}>
+            <Pressable
+              style={[styles.categoryFilterChip, selectedCategories.length === 0 && styles.categoryFilterChipActive]}
+              onPress={() => setSelectedCategories([])}
+            >
+              <View style={[styles.categoryDot, { backgroundColor: palette.sub }]} />
+              <Text style={[styles.categoryFilterText, selectedCategories.length === 0 && styles.categoryFilterTextActive]}>
+                {language === 'vi' ? 'Tất cả' : 'All'}
+              </Text>
+            </Pressable>
+            {availableCategories.map((cat) => {
+              const active = selectedCategories.includes(cat);
+              const color = categoryColorMap.get(cat) ?? palette.accent;
+              return (
+                <Pressable
+                  key={cat}
+                  style={[styles.categoryFilterChip, active && styles.categoryFilterChipActive]}
+                  onPress={() => {
+                    setSelectedCategories((prev) => (prev.includes(cat) ? prev.filter((x) => x !== cat) : [...prev, cat]));
+                  }}
+                >
+                  <View style={[styles.categoryDot, { backgroundColor: color }]} />
+                  <Text style={[styles.categoryFilterText, active && styles.categoryFilterTextActive]} numberOfLines={1}>
+                    {cat}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
           <Text style={styles.subtle}>{t(language, 'byCategory')} • {formatAmount(expenseByCategory.total, settings.defaultCurrency, locale)}</Text>
           <View style={styles.donutWrap}>
             <DonutChart
@@ -891,7 +1236,7 @@ export default function App() {
               strokeWidth={20}
               segments={expenseByCategory.items.slice(0, 6).map((item, idx) => ({
                 value: item.amount,
-                color: DONUT_COLORS[idx % DONUT_COLORS.length],
+                color: categoryColorMap.get(item.category) ?? DONUT_COLORS[idx % DONUT_COLORS.length],
               }))}
               trackColor={palette.muted}
             />
@@ -908,7 +1253,15 @@ export default function App() {
                 <Text style={styles.catAmount}>{formatAmount(item.amount, settings.defaultCurrency, locale)} ({item.pct.toFixed(0)}%)</Text>
               </View>
               <View style={styles.catTrack}>
-                <View style={[styles.catFill, { width: `${Math.max(4, item.pct)}%` }]} />
+                <View
+                  style={[
+                    styles.catFill,
+                    {
+                      width: `${Math.max(4, item.pct)}%`,
+                      backgroundColor: categoryColorMap.get(item.category) ?? palette.accent,
+                    },
+                  ]}
+                />
               </View>
             </View>
           ))}
@@ -927,7 +1280,7 @@ export default function App() {
                 const converted = toMainCurrency(tx.amount, tx.currency);
                 return (
                   <Pressable key={tx.id} style={styles.lineRow} onPress={() => setSelectedTx(tx)}>
-                    <Text style={styles.lineTextShrink} numberOfLines={1} ellipsizeMode="tail">{tx.note || tx.category}</Text>
+                    <Text style={styles.lineTextShrink} numberOfLines={1} ellipsizeMode="tail">{shortTxTitle(tx)}</Text>
                     <Text style={tx.type === 'income' ? styles.success : styles.danger}>{tx.type === 'income' ? '+' : '-'}{formatAmount(converted, settings.defaultCurrency, locale)}</Text>
                   </Pressable>
                 );
@@ -1188,14 +1541,58 @@ export default function App() {
                   {selectedTx ? (
                     <>
                       <Text style={styles.blockTitle}>{t(language, 'transactionDetail')}</Text>
-                      <Text style={styles.lineText}>{selectedTx.note || selectedTx.category}</Text>
-                      <Text style={styles.subtle}>{selectedTx.date} • {selectedTx.category}</Text>
+                      <Text style={styles.lineText}>{shortTxTitle(selectedTx)}</Text>
+                      <View style={styles.detailList}>
+                        <Text style={styles.detailRow}>
+                          <Text style={styles.detailLabel}>{language === 'vi' ? 'Số tiền: ' : 'Amount: '}</Text>
+                          <Text style={selectedTx.type === 'income' ? styles.success : styles.danger}>
+                            {selectedTx.type === 'income' ? '+' : '-'}
+                            {formatAmount(selectedTx.amount, selectedTx.currency, locale)}
+                          </Text>
+                        </Text>
+                        {selectedTx.currency !== settings.defaultCurrency ? (
+                          <Text style={styles.detailRow}>
+                            <Text style={styles.detailLabel}>{language === 'vi' ? 'Quy đổi: ' : 'Converted: '}</Text>
+                            {formatAmount(toMainCurrency(selectedTx.amount, selectedTx.currency), settings.defaultCurrency, locale)}
+                          </Text>
+                        ) : null}
+                        <Text style={styles.detailRow}>
+                          <Text style={styles.detailLabel}>{language === 'vi' ? 'Loại: ' : 'Type: '}</Text>
+                          {selectedTx.type === 'income' ? t(language, 'income') : t(language, 'expense')}
+                        </Text>
+                        <Text style={styles.detailRow}>
+                          <Text style={styles.detailLabel}>{language === 'vi' ? 'Danh mục: ' : 'Category: '}</Text>
+                          {selectedTx.category}
+                        </Text>
+                        <Text style={styles.detailRow}>
+                          <Text style={styles.detailLabel}>{language === 'vi' ? 'Ngày: ' : 'Date: '}</Text>
+                          {selectedTx.date}
+                        </Text>
+                        {selectedTx.merchant ? (
+                          <Text style={styles.detailRow}>
+                            <Text style={styles.detailLabel}>{language === 'vi' ? 'Địa điểm: ' : 'Merchant: '}</Text>
+                            {selectedTx.merchant}
+                          </Text>
+                        ) : null}
+                        {selectedTx.note ? (
+                          <Text style={styles.detailRow}>
+                            <Text style={styles.detailLabel}>{language === 'vi' ? 'Ghi chú: ' : 'Note: '}</Text>
+                            {selectedTx.note}
+                          </Text>
+                        ) : null}
+                        {selectedTx.rawInput ? (
+                          <Text style={styles.detailRow}>
+                            <Text style={styles.detailLabel}>{language === 'vi' ? 'Nội dung gốc: ' : 'Raw input: '}</Text>
+                            {selectedTx.rawInput}
+                          </Text>
+                        ) : null}
+                      </View>
 
                       {selectedTx.receiptUri ? (
                         <View style={styles.receiptWrap}>
                           {selectedTx.receiptType === 'image' ? (
                             <Pressable onPress={() => onOpenReceiptImage(selectedTx.receiptUri!)}>
-                              <Image source={{ uri: selectedTx.receiptUri }} style={styles.receiptImage} resizeMode="contain" />
+                              <Image source={{ uri: selectedTx.receiptUri }} style={styles.receiptImage as any} resizeMode="contain" />
                             </Pressable>
                           ) : null}
                           {selectedTx.receiptType === 'pdf' ? <Text style={styles.subtle}>PDF: {selectedTx.receiptName ?? 'receipt.pdf'}</Text> : null}
@@ -1229,7 +1626,7 @@ export default function App() {
                 <Pressable style={styles.receiptViewerClose} onPress={() => setReceiptViewerUri(null)}>
                   <Text style={styles.ghostText}>{t(language, 'close')}</Text>
                 </Pressable>
-                {receiptViewerUri ? <Image source={{ uri: receiptViewerUri }} style={styles.receiptViewerImage} resizeMode="contain" /> : null}
+                {receiptViewerUri ? <Image source={{ uri: receiptViewerUri }} style={styles.receiptViewerImage as any} resizeMode="contain" /> : null}
               </View>
             </Modal>
 
@@ -1510,12 +1907,34 @@ function makeStyles(c: typeof dark) {
     headerText: { color: c.text, fontSize: 28, fontWeight: '800', marginTop: 4, letterSpacing: -0.3 },
     txCard: { backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: 24, padding: 14, flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
     txLeft: { flex: 1, paddingRight: 10 },
-    txName: { color: c.text, fontSize: 18, fontWeight: '600', lineHeight: 24 },
+    txName: { color: c.text, fontSize: 17, fontWeight: '700', lineHeight: 23 },
     txRight: { alignItems: 'flex-end', justifyContent: 'space-between', minWidth: 110, maxWidth: 150 },
     amountText: { flexShrink: 1, textAlign: 'right' },
     success: { color: c.accent, fontWeight: '700' },
     danger: { color: c.danger, fontWeight: '700' },
     input: { backgroundColor: c.muted, borderWidth: 1, borderColor: c.border, borderRadius: 16, color: c.text, paddingHorizontal: 14, paddingVertical: 12, fontSize: 18 },
+    passwordWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: c.muted,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 16,
+      minHeight: 52,
+      paddingLeft: 14,
+      paddingRight: 8,
+    },
+    passwordInput: { flex: 1, color: c.text, fontSize: 18, paddingVertical: 10, paddingRight: 10 },
+    passwordToggle: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.card,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
     inputBig: { backgroundColor: c.muted, borderWidth: 1, borderColor: c.border, borderRadius: 20, color: c.text, paddingHorizontal: 14, paddingVertical: 14, fontSize: 28, fontWeight: '700' },
     primaryBtn: { backgroundColor: c.accent, borderRadius: 18, alignItems: 'center', paddingVertical: 13 },
     primaryBtnText: { color: c.bg, fontWeight: '800', fontSize: 20 },
@@ -1573,6 +1992,22 @@ function makeStyles(c: typeof dark) {
     miniChipActive: { borderColor: c.accent, backgroundColor: c.card },
     miniChipText: { color: c.sub, fontSize: 14, fontWeight: '600' },
     miniChipTextActive: { color: c.accent },
+    categoryFilterChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.muted,
+      maxWidth: 170,
+    },
+    categoryFilterChipActive: { borderColor: c.accent, backgroundColor: c.card },
+    categoryDot: { width: 9, height: 9, borderRadius: 5 },
+    categoryFilterText: { color: c.sub, fontSize: 13, fontWeight: '600' },
+    categoryFilterTextActive: { color: c.text },
     donutWrap: { alignItems: 'center', justifyContent: 'center', marginVertical: 8 },
     donutCenter: { position: 'absolute', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 26 },
     donutValue: { color: c.text, fontWeight: '700', fontSize: 14, textAlign: 'center' },
@@ -1601,6 +2036,9 @@ function makeStyles(c: typeof dark) {
     },
     modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
     modalCard: { backgroundColor: c.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 14, gap: 8, borderWidth: 1, borderColor: c.border },
+    detailList: { gap: 4, paddingBottom: 6 },
+    detailRow: { color: c.text, fontSize: 14, lineHeight: 20 },
+    detailLabel: { color: c.sub, fontWeight: '600' },
     receiptWrap: { gap: 8 },
     receiptImage: { width: '100%', height: 220, borderRadius: 10, backgroundColor: c.muted },
     receiptViewerBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.94)', alignItems: 'center', justifyContent: 'center', padding: 16 },

@@ -188,7 +188,7 @@ export async function extractReceiptText(imageUri: string, language: Language): 
   const mimeType = pickMimeType(imageUri, 'image');
   const prompt =
     language === 'vi'
-      ? 'Đọc hóa đơn và trả về 1 câu ngắn gồm món/merchant + số tiền + tiền tệ + ngày. Ví dụ: "an com 50000 vnd hom nay".'
+      ? 'Đọc hóa đơn và trả về 1 câu ngắn đúng format: "<ten cua hang/mon> <so tien> <tien te> <ngay YYYY-MM-DD>". Ví dụ: "Highlands Coffee 85000 vnd 2026-02-26".'
       : 'Read this receipt and return one short sentence with merchant/item + amount + currency + date. Example: "grocery 12 usd today".';
 
   return callGemini([
@@ -217,6 +217,9 @@ export async function parseReceiptImageToTransaction(
           'Keys bắt buộc: type, amount, currency, category, merchant, date, note, rawInput.',
           'Ưu tiên amount là số tiền thanh toán cuối cùng (tổng phải trả).',
           'Không lấy nhầm số lượng, dung tích, số model làm amount.',
+          'merchant phải là tên nơi chi tiêu/cửa hàng ngắn gọn.',
+          'note chỉ để rất ngắn (tối đa 6 từ), ưu tiên bằng merchant hoặc tên món chính.',
+          'category nên chọn trong các nhóm: Ăn uống, Di chuyển, Mua sắm, Hóa đơn, Nhà ở, Sức khỏe, Giáo dục, Giải trí, Thu nhập, Chi khác.',
           'Date phải là YYYY-MM-DD, currency chỉ USD hoặc VND, type chỉ income hoặc expense.',
           'Nếu thiếu currency thì dùng defaultCurrency.',
           'Nếu date không rõ, dùng hôm nay.',
@@ -226,6 +229,7 @@ export async function parseReceiptImageToTransaction(
           'Required keys: type, amount, currency, category, merchant, date, note, rawInput.',
           'Prefer amount as the final payable total.',
           'Do not confuse quantity/model/volume numbers with amount.',
+          'Pick category from: Food & Drink, Transport, Shopping, Bills & Utilities, Housing, Health, Education, Entertainment, Salary, Other Expense.',
           'Date must be YYYY-MM-DD, currency must be USD or VND, type must be income or expense.',
           'If currency missing, use defaultCurrency.',
           'If date unclear, use today.',
@@ -252,8 +256,11 @@ export async function parseReceiptImageToTransaction(
     currency: parsed.currency,
     category: parsed.category ?? (parsed.type === 'income' ? 'Other Income' : 'Other Expense'),
     merchant: parsed.merchant,
-    date: parsed.date ?? new Date().toISOString().slice(0, 10),
-    note: parsed.note ?? parsed.merchant ?? (language === 'vi' ? 'Giao dịch từ ảnh' : 'Image transaction'),
+    date: /^\d{4}-\d{2}-\d{2}$/.test(parsed.date ?? '') ? (parsed.date as string) : new Date().toISOString().slice(0, 10),
+    note:
+      parsed.merchant?.trim() ||
+      parsed.note?.trim() ||
+      (language === 'vi' ? 'Giao dịch từ ảnh' : 'Image transaction'),
     inputMode: 'image',
     rawInput: parsed.rawInput ?? parsed.note ?? '',
   };
@@ -272,6 +279,7 @@ export async function normalizeTextToTransaction(
           'Hiểu tiếng lóng như: k=nghìn, tr/củ/chai=triệu, xị=100k.',
           'Nếu thiếu thông tin, suy luận hợp lý.',
           'Trả về JSON duy nhất với keys: type, amount, currency, category, merchant, date, note, rawInput.',
+          'category nên thuộc các nhóm: Ăn uống, Di chuyển, Mua sắm, Hóa đơn, Nhà ở, Sức khỏe, Giáo dục, Giải trí, Thu nhập, Chi khác.',
           'Date phải là YYYY-MM-DD.',
           'currency chỉ được là USD hoặc VND.',
           'type chỉ được là income hoặc expense.',
@@ -281,6 +289,7 @@ export async function normalizeTextToTransaction(
           'Understand slang/shorthand such as k=thousand, tr/mil=million.',
           'Infer missing fields reasonably.',
           'Return only JSON with keys: type, amount, currency, category, merchant, date, note, rawInput.',
+          'category should be one of: Food & Drink, Transport, Shopping, Bills & Utilities, Housing, Health, Education, Entertainment, Salary, Other Expense.',
           'Date must be YYYY-MM-DD.',
           'currency must be USD or VND.',
           'type must be income or expense.',
